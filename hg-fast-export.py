@@ -122,9 +122,22 @@ def get_author(logmessage,committer,authors):
       return r
   return committer
 
+next_blob_mark = 2147483647
+def export_blob(data):
+  global next_blob_mark
+  wr('blob')
+  wr('mark :%d' % next_blob_mark)
+  wr('data %d' % len(data))
+  wr(data)
+  wr()
+  mk = next_blob_mark
+  next_blob_mark -= 1
+  return mk
+
 def export_file_contents(ctx,manifest,files,hgtags,encoding=''):
   count=0
   max=len(files)
+  defered_wr=''
   for file in files:
     # Skip .hgtags files. They only get us in trouble.
     if not hgtags and file == ".hgtags":
@@ -135,14 +148,15 @@ def export_file_contents(ctx,manifest,files,hgtags,encoding=''):
       filename=file.decode(encoding).encode('utf8')
     else:
       filename=file
-    wr('M %s inline %s' % (gitmode(manifest.flags(file)),filename))
-    wr('data %d' % len(d)) # had some trouble with size()
-    wr(d)
+
+    mk = export_blob(d)
+    defered_wr += ('M %s :%d %s' % (gitmode(manifest.flags(file)),mk,filename)) + '\n'
     count+=1
     if count%cfg_export_boundary==0:
       sys.stderr.write('Exported %d/%d files\n' % (count,max))
   if max>cfg_export_boundary:
     sys.stderr.write('Exported %d/%d files\n' % (count,max))
+  return defered_wr
 
 def sanitize_name(name,what="branch"):
   """Sanitize input roughly according to git-check-ref-format(1)"""
@@ -177,17 +191,19 @@ def export_commit(ui,repo,revision,old_marks,max,count,authors,sob,brmap,hgtags,
 
   parents = [p for p in repo.changelog.parentrevs(revision) if p >= 0]
 
-  if len(parents)==0 and revision != 0:
-    wr('reset refs/heads/%s' % branch)
+  defered_wr = ''
 
-  wr('commit refs/heads/%s' % branch)
-  wr('mark :%d' % (revision+1))
+  if len(parents)==0 and revision != 0:
+    defered_wr += ('reset refs/heads/%s' % branch) + '\n'
+
+  defered_wr += ('commit refs/heads/%s' % branch) + '\n'
+  defered_wr += ('mark :%d' % (revision+1)) + '\n'
   if sob:
-    wr('author %s %d %s' % (get_author(desc,user,authors),time,timezone))
-  wr('committer %s %d %s' % (user,time,timezone))
-  wr('data %d' % (len(desc)+1)) # wtf?
-  wr(desc)
-  wr()
+    defered_wr += ('author %s %d %s' % (get_author(desc,user,authors),time,timezone)) + '\n'
+  defered_wr += ('committer %s %d %s' % (user,time,timezone)) + '\n'
+  defered_wr += ('data %d' % (len(desc)+1)) + '\n' # wtf?
+  defered_wr += (desc) + '\n'
+  defered_wr += '\n'
 
   ctx=repo.changectx(str(revision))
   man=ctx.manifest()
@@ -199,7 +215,7 @@ def export_commit(ui,repo,revision,old_marks,max,count,authors,sob,brmap,hgtags,
     added.sort()
     type='full'
   else:
-    wr('from %s' % revnum_to_revref(parents[0], old_marks))
+    defered_wr += ('from %s' % revnum_to_revref(parents[0], old_marks)) + '\n'
     if len(parents) == 1:
       # later non-merge revision: feed in changed manifest
       # if we have exactly one parent, just take the changes from the
@@ -208,7 +224,7 @@ def export_commit(ui,repo,revision,old_marks,max,count,authors,sob,brmap,hgtags,
       added,changed,removed=f[1],f[0],f[2]
       type='simple delta'
     else: # a merge with two parents
-      wr('merge %s' % revnum_to_revref(parents[1], old_marks))
+      defered_wr += ('merge %s' % revnum_to_revref(parents[1], old_marks)) + '\n'
       # later merge revision: feed in changed manifest
       # for many files comparing checksums is expensive so only do it for
       # merges where we really need it due to hg's revlog logic
@@ -222,9 +238,10 @@ def export_commit(ui,repo,revision,old_marks,max,count,authors,sob,brmap,hgtags,
     removed=[r.decode(encoding).encode('utf8') for r in removed]
 
   map(lambda r: wr('D %s' % r),removed)
-  export_file_contents(ctx,man,added,hgtags,encoding)
-  export_file_contents(ctx,man,changed,hgtags,encoding)
-  wr()
+  defered_wr += export_file_contents(ctx,man,added,hgtags,encoding)
+  defered_wr += export_file_contents(ctx,man,changed,hgtags,encoding)
+
+  wr(defered_wr)
 
   count=checkpoint(count)
   count=generate_note(user,time,timezone,revision,ctx,count,notes)
